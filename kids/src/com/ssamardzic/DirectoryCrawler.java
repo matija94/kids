@@ -1,33 +1,42 @@
 package com.ssamardzic;
 
-import com.ssamardzic.errors.CannotReadFile;
-
 import java.io.File;
-import java.net.URI;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 
-public class DirectoryCrawler extends Thread {
+public class DirectoryCrawler implements Runnable {
 
     private LinkedBlockingQueue<ScanningJob> jobQueue;
-
-    private long bytesSizeThreshold;
-
-    private String directoryToScan;
 
     private String corpusPrefix;
 
     private Map<String, Long> lastModified;
 
+    private boolean shutdown = false;
 
-    private class FileJob implements ScanningJob {
-        private List<URI> uris;
+    private long timeToSleep;
 
-        public FileJob(List<URI> uris) {
-            this.uris = uris;
+    private File root;
+
+    public DirectoryCrawler(LinkedBlockingQueue<ScanningJob> jobQueue, File root, String corpusPrefix,
+                            long timeToSleep) {
+        this.root = root;
+        this.jobQueue = jobQueue;
+        this.corpusPrefix = corpusPrefix;
+        lastModified = new HashMap<>();
+        this.timeToSleep = timeToSleep;
+    }
+
+    class FileJob implements ScanningJob {
+        private File corpusDir;
+        private String rootDir;
+
+        FileJob(String rootDir, File corpusDir) {
+            this.rootDir = rootDir;
+            this.corpusDir = corpusDir;
         }
 
         @Override
@@ -37,52 +46,51 @@ public class DirectoryCrawler extends Thread {
 
         @Override
         public String getQuery() {
-            return "file";
+            return rootDir;
         }
 
-        @Override
-        public List<URI> getUris() {
-            return null;
+        public File getCorpusDir() {
+            return corpusDir;
         }
-
-        @Override
-        public Future<Map<String, Integer>> initiate() {
-            return null;
-        }
-
-
 
     }
 
     @Override
-    public synchronized void start() {
-        super.start();
-
-        File root = new File(directoryToScan);
-
-        File[] files = root.listFiles();
-        long currentBytesSize = 0;
-        List<URI> uris = new ArrayList<>();
-
-        for (File file : files) {
-            long size = file.length();
-            if (bytesSizeThreshold >= size + currentBytesSize) {
-                currentBytesSize += size;
-                uris.add(file.toURI());
+    public void run() {
+        while(!shutdown) {
+            File[] files = root.listFiles();
+            List<File> jobFiles = scan(files);
+            for (File jobFile : jobFiles) {
+                FileJob fj = new FileJob(root.getName(), jobFile);
+                jobQueue.add(fj);
             }
-            else {
-                ScanningJob job = new FileJob(uris);
-                uris = new ArrayList<>();
-                currentBytesSize = 0;
-                try {
-                    jobQueue.put(job);
-                } catch (InterruptedException e) {
-                   // todo log job failed to put on queue
-                }
+            try {
+                Thread.sleep(timeToSleep);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
             }
         }
     }
 
+    public void shutdown() {
+        shutdown = true;
+    }
 
-
+    private List<File> scan(File[] files) {
+        List<File> toScan = new ArrayList<>();
+        for (File file : files) {
+            if (file.getName().startsWith(corpusPrefix)) {
+                long modifiedAt = lastModified.getOrDefault(file.getName(), -1l);
+                if (modifiedAt != file.lastModified()) {
+                    lastModified.put(file.getName(), file.lastModified());
+                    toScan.add(file);
+                }
+            }
+            else if (file.isDirectory()){
+                List<File> toScanChildren = scan(file.listFiles());
+                toScan.addAll(toScanChildren);
+            }
+        }
+        return toScan;
+    }
 }
